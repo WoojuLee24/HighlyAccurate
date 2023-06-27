@@ -17,7 +17,8 @@ class VGGUnet(nn.Module):
 
         self.level = level
 
-        vgg16 = torchvision.models.vgg16(pretrained=True)
+        vgg16 = torchvision.models.vgg16(pretrained=False)
+        vgg16.load_state_dict(torch.load('/ws/external/Models/pretrained/vgg16-397923af.pth'))
 
         # load CNN from VGG16, the first three block
         self.conv0 = vgg16.features[0]

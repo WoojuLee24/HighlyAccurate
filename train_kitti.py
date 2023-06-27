@@ -426,7 +426,7 @@ def train(net, lr, args, save_path):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--resume', type=int, default=0, help='resume the trained model')
-    parser.add_argument('--test', type=int, default=1, help='test with trained model')
+    parser.add_argument('--test', type=int, default=0, help='test with trained model')
     parser.add_argument('--debug', type=int, default=0, help='debug to dump middle processing images')
 
     parser.add_argument('--epochs', type=int, default=5, help='number of training epochs')
@@ -486,7 +486,7 @@ def parse_args():
 
 
 def getSavePath(args):
-    save_path = './ModelsKitti/LM_' + str(args.direction) \
+    save_path = '/ws/external/Models/ModelsKitti/LM_' + str(args.direction) \
                 + '/lat' + str(args.shift_range_lat) + 'm_lon' + str(args.shift_range_lon) + 'm_rot' + str(
         args.rotation_range) \
                 + '_Lev' + str(args.level) + '_Nit' + str(args.N_iters) \
