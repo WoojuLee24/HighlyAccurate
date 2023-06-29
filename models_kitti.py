@@ -623,10 +623,10 @@ class LM_S2GP(nn.Module):
         xyz_grds = []
         for level in range(4):
             grd_H, grd_W = ori_grdH/(2**(3-level)), ori_grdW/(2**(3-level))
-            if self.args.proj == 'geo':
+            if self.args.proj == 'geo': # proj based on ground plane homography
                 xyz_grd, mask, xyz_w = self.grd_img2cam(grd_H, grd_W, ori_grdH,
                                                  ori_grdW)  # [1, grd_H, grd_W, 3] under the grd camera coordinates
-                xyz_grds.append((xyz_grd, mask, xyz_w))
+                xyz_grds.append((xyz_grd, mask, xyz_w)) # multi-scale, xyz_grds is wKinv[v_g]
 
             else:
                 xyz_grd, mask = self.grd_img2cam_polar(grd_H, grd_W, ori_grdH, ori_grdW)
@@ -646,6 +646,8 @@ class LM_S2GP(nn.Module):
         self.polar_grids = polar_grids
 
         if self.args.Optimizer=='NN':
+            self.NNrefine = NNrefine()
+        elif self.args.Optimizer=='NNv0.1':
             self.NNrefine = NNrefine()
 
         torch.autograd.set_detect_anomaly(True)
@@ -671,7 +673,8 @@ class LM_S2GP(nn.Module):
                               torch.arange(0, grd_W, dtype=torch.float32))
         uv1 = torch.stack([u, v, torch.ones_like(u)], dim=-1).unsqueeze(dim=0)  # [1, grd_H, grd_W, 3]
         xyz_w = torch.sum(camera_k_inv[:, None, None, :, :] * uv1[:, :, :, None, :], dim=-1)  # [1, grd_H, grd_W, 3]
-
+        # set y_c to the distance between query camera to the ground plane
+        # r = xyz_w[..., 1:2].cpu().detach().numpy()
         w = camera_height / torch.where(torch.abs(xyz_w[..., 1:2]) > utils.EPS, xyz_w[..., 1:2],
                                         utils.EPS * torch.ones_like(xyz_w[..., 1:2]))  # [BN, grd_H, grd_W, 1]
         xyz_grd = xyz_w * w  # [1, grd_H, grd_W, 3] under the grd camera coordinates
@@ -724,17 +727,17 @@ class LM_S2GP(nn.Module):
         sin = torch.sin(heading)
         zeros = torch.zeros_like(cos)
         ones = torch.ones_like(cos)
-        R = torch.cat([cos, zeros, -sin, zeros, ones, zeros, sin, zeros, cos], dim=-1)  # shape = [B, 9]
+        R = torch.cat([cos, zeros, -sin, zeros, ones, zeros, sin, zeros, cos], dim=-1)  # shape = [B, 9] # why? only heading direction
         R = R.view(B, 3, 3)  # shape = [B, N, 3, 3]
         # this R is the inverse of the R in G2SP
 
         camera_height = utils.get_camera_height()
         # camera offset, shift[0]:east,Z, shift[1]:north,X
         height = camera_height * torch.ones_like(shift_u[:, :1])
-        T0 = torch.cat([shift_v, height, -shift_u], dim=-1)  # shape = [B, 3]
+        T0 = torch.cat([shift_v, height, -shift_u], dim=-1)  # shape = [B, 3]   # why? -> shift_v: lat, shift_u: -lon,
         # T0 = torch.unsqueeze(T0, dim=-1)  # shape = [B, N, 3, 1]
         # T = torch.einsum('bnij, bnj -> bni', -R, T0) # [B, N, 3]
-        T = torch.sum(-R * T0[:, None, :], dim=-1)   # [B, 3]
+        T = torch.sum(-R * T0[:, None, :], dim=-1)   # [B, 3]   # TODO: why -RT0?
 
         # The above R, T define transformation from camera to world
 
@@ -922,8 +925,8 @@ class LM_S2GP(nn.Module):
         # print('==================')
 
         sat_f_trans, new_jac = grid_sample(sat_f,
-                                           uv,
-                                           jac)
+                                           uv,  # uv [1, 32, 128, 2]; [32, 128]=[w,h], [2]=uv
+                                           jac) # jac [3, 1, 32, 128, 2]; 3: jac_shiftu,v,heading
         sat_f_trans = sat_f_trans * mask[:, None, :, :]
         if require_jac:
             new_jac = new_jac * mask[None, :, None, :, :]
@@ -988,7 +991,6 @@ class LM_S2GP(nn.Module):
         grd_feat_norm = torch.maximum(grd_feat_norm, 1e-6 * torch.ones_like(grd_feat_norm))
         grd_feat = grd_feat / grd_feat_norm[:, None]
 
-
         r = sat_feat_proj - grd_feat  # [B, D]
 
         if self.using_weight:
@@ -1051,6 +1053,42 @@ class LM_S2GP(nn.Module):
         shift_u_new = shift_u + delta[:, 0:1]
         shift_v_new = shift_v + delta[:, 1:2]
         theta_new = theta + delta[:, 2:3]
+        return shift_u_new, shift_v_new, theta_new
+
+    def NN_updatev0_1(self, shift_u, shift_v, theta, sat_feat_proj, sat_conf_proj, grd_feat, grd_conf, dfeat_dpose):
+        """
+        add assumption on the shift_u, shift_v
+        """
+        # # TODO
+        # sat_feat_norm = torch.norm(sat_feat_proj, p=2, dim=-1)
+        # sat_feat_norm = torch.maximum(sat_feat_norm, 1e-6 * torch.ones_like(sat_feat_norm))
+        # sat_feat_proj = sat_feat_proj / sat_feat_norm[:, None]
+        # grd_feat_norm = torch.norm(grd_feat, p=2, dim=-1)
+        # grd_feat_norm = torch.maximum(grd_feat_norm, 1e-6 * torch.ones_like(grd_feat_norm))
+        # grd_feat = grd_feat / grd_feat_norm[:, None]
+        B = sat_feat_proj.size(0)
+        delta = self.NNrefine(sat_feat_proj, grd_feat)  # [B, 3]
+        # print('=======================')
+        # print('delta.shape: ', delta.shape)
+        # print('shift_u.shape', shift_u.shape)
+        # print('=======================')
+
+        # edited
+        if self.args.rotation_range == 0:
+            delta[:, 2:3] = delta[:, 2:3] * 0
+
+        shift_u_new = shift_u + delta[:, 0:1]
+        shift_v_new = shift_v + delta[:, 1:2]
+        theta_new = theta + delta[:, 2:3]
+
+        # edited
+        rand_u = torch.distributions.uniform.Uniform(-1, 1).sample([B, 1]).to(shift_u.device)
+        rand_v = torch.distributions.uniform.Uniform(-1, 1).sample([B, 1]).to(shift_u.device)
+        rand_u.requires_grad = True
+        rand_v.requires_grad = True
+        shift_u_new = torch.where((shift_u_new > -2.5) & (shift_u_new < 2.5), shift_u_new, rand_u)
+        shift_v_new = torch.where((shift_v_new > -2.5) & (shift_v_new < 2.5), shift_v_new, rand_v)
+
         return shift_u_new, shift_v_new, theta_new
 
     def SGD_update(self, shift_u, shift_v, theta, sat_feat_proj, sat_conf_proj, grd_feat, grd_conf, dfeat_dpose):
@@ -1232,6 +1270,13 @@ class LM_S2GP(nn.Module):
                                                                            dfeat_dpose_new)
                 elif self.args.Optimizer == 'NN':
                     shift_u_new, shift_v_new, heading_new = self.NN_update(shift_u, shift_v, heading,
+                                                                         sat_feat_new,
+                                                                         sat_conf_new,
+                                                                         grd_feat_new,
+                                                                         grd_conf_new,
+                                                                         dfeat_dpose_new)
+                elif self.args.Optimizer == 'NNv0.1':
+                    shift_u_new, shift_v_new, heading_new = self.NN_updatev0_1(shift_u, shift_v, heading,
                                                                          sat_feat_new,
                                                                          sat_conf_new,
                                                                          grd_feat_new,

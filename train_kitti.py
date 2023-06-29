@@ -340,6 +340,8 @@ def train(net, lr, args, save_path):
         loss_vec = []
 
         print('batch_size:', mini_batch, '\n num of batches:', len(trainloader))
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
 
         for Loop, Data in enumerate(trainloader, 0):
             # get the inputs
@@ -356,7 +358,7 @@ def train(net, lr, args, save_path):
                 L1_loss, L2_loss, L3_loss, L4_loss, grd_conf_list = \
                     net(sat_map, grd_left_imgs, gt_shift_u, gt_shift_v, gt_heading, mode='train', file_name=file_name,
                         loop=Loop, level_first=args.level_first)
-            elif args.direction =='G2SP':
+            elif args.direction == 'G2SP':
                 loss, loss_decrease, shift_lat_decrease, shift_lon_decrease, thetas_decrease, loss_last, \
                 shift_lat_last, shift_lon_last, theta_last, \
                 L1_loss, L2_loss, L3_loss, L4_loss, grd_conf_list = \
@@ -427,6 +429,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--resume', type=int, default=0, help='resume the trained model')
     parser.add_argument('--test', type=int, default=0, help='test with trained model')
+    parser.add_argument('--load-model', type=str, default='best', choices=['0', '1', '2', '3'], help='load model for test')
     parser.add_argument('--debug', type=int, default=0, help='debug to dump middle processing images')
 
     parser.add_argument('--epochs', type=int, default=5, help='number of training epochs')
@@ -436,7 +439,7 @@ def parse_args():
     parser.add_argument('--stereo', type=int, default=0, help='use left and right ground image')
     parser.add_argument('--sequence', type=int, default=1, help='use n images merge to 1 ground image')
 
-    parser.add_argument('--rotation_range', type=float, default=10., help='degree')
+    parser.add_argument('--rotation_range', type=float, default=10., help='degree') # default +-10
     parser.add_argument('--shift_range_lat', type=float, default=20., help='meters')
     parser.add_argument('--shift_range_lon', type=float, default=20., help='meters')
 
@@ -466,7 +469,7 @@ def parse_args():
 
     parser.add_argument('--direction', type=str, default='S2GP', help='G2SP' or 'S2GP')
     parser.add_argument('--Load', type=int, default=0, help='0 or 1, load_metric_learning_weight or not')
-    parser.add_argument('--Optimizer', type=str, default='LM', help='LM or SGD or ADAM')
+    parser.add_argument('--Optimizer', type=str, default='LM', help='LM or SGD or ADAM, NN, NN2')
 
     parser.add_argument('--level_first', type=int, default=0, help='0 or 1, estimate grd depth or not')
     parser.add_argument('--proj', type=str, default='geo', help='geo, polar, nn')
@@ -486,9 +489,11 @@ def parse_args():
 
 
 def getSavePath(args):
-    save_path = '/ws/external/Models/ModelsKitti/LM_' + str(args.direction) \
-                + '/lat' + str(args.shift_range_lat) + 'm_lon' + str(args.shift_range_lon) + 'm_rot' + str(
+    save_path = f'/ws/external/Models/ModelsKitti/{args.Optimizer}_' \
+                + str(args.direction) \
+                + 'lat' + str(args.shift_range_lat) + 'm_lon' + str(args.shift_range_lon) + 'm_rot' + str(
         args.rotation_range) \
+                + f'_b{args.batch_size}' \
                 + '_Lev' + str(args.level) + '_Nit' + str(args.N_iters) \
                 + '_Wei' + str(args.using_weight) \
                 + '_Dam' + str(args.train_damping) \
@@ -543,7 +548,13 @@ if __name__ == '__main__':
     ###########################
 
     if args.test:
-        net.load_state_dict(torch.load(os.path.join(save_path, 'model_1.pth')))
+        if args.load_model == 'best':
+            model = 'Model_best.pth'
+        else:
+            model = f'model_{args.load_model}.pth'
+        net.load_state_dict(torch.load(os.path.join(save_path, model)))
+        # net.load_state_dict(torch.load(os.path.join(save_path, 'Model_best.pth')))
+        # net.load_state_dict(torch.load(os.path.join(args.load_model)))
         test1(net, args, save_path, 0., epoch=0)
         test2(net, args, save_path, 0., epoch=0)
 

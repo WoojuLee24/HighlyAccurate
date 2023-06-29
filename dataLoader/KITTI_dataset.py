@@ -14,6 +14,7 @@ import torch.nn.functional as F
 
 from torch.utils.data import DataLoader
 from torchvision import transforms
+import matplotlib.pyplot as plt
 
 root_dir = '/ws/data/kitti-vo' # '/media/yujiao/6TB/dataset/Kitti1' # '../../data/Kitti' # '../Data' #'..\\Data' #
 
@@ -35,6 +36,19 @@ train_file = '/ws/external/dataLoader/train_files.txt'
 test1_file = '/ws/external/dataLoader/test1_files.txt'
 test2_file = '/ws/external/dataLoader/test2_files.txt'
 
+
+def imsave(image, folder, name):
+    root = f"/ws/external/debug_images/{folder}"
+    os.makedirs(root, exist_ok=True)
+
+    if isinstance(image, Image.Image):
+        image.save(root + f'/{name}.png')
+        return
+    image = (image - image.min()) / (image.max() - image.min())
+    image = image.cpu().detach().numpy()
+    image = (image * 255).astype(np.uint8)
+    image = np.transpose(image, (1, 2, 0))
+    plt.imsave(root + f'/{name}.png', np.asarray(image))
 
 
 class SatGrdDataset(Dataset):
@@ -129,6 +143,7 @@ class SatGrdDataset(Dataset):
                                           (1, 0, utils.CameraGPS_shift_left[0] / self.meter_per_pixel,
                                            0, 1, utils.CameraGPS_shift_left[1] / self.meter_per_pixel),
                                           resample=Image.BILINEAR)
+
         # the homography is defined on: from target pixel to source pixel
         # now east direction is the real vehicle heading direction
 
@@ -143,10 +158,17 @@ class SatGrdDataset(Dataset):
                  0, 1, -gt_shift_y * self.shift_range_pixels_lat),
                 resample=Image.BILINEAR)
 
-        # randomly generate roation
+        # randomly generate rotation
         theta = np.random.uniform(-1, 1)
         sat_rand_shift_rand_rot = \
             sat_rand_shift.rotate(theta * self.rotation_range)
+
+        # # debug images
+        # imsave(sat_map, 'sat', 'orig')
+        # imsave(sat_rot, 'sat', 'rot')
+        # imsave(sat_align_cam, 'sat', 'align')
+        # imsave(sat_rand_shift, 'sat', 'rshift')
+        # imsave(sat_rand_shift_rand_rot, 'sat', 'rshift_rrot')
 
         sat_map =TF.center_crop(sat_rand_shift_rand_rot, utils.SatMap_process_sidelength)
         # sat_map = np.array(sat_map, dtype=np.float32)
@@ -274,10 +296,17 @@ class SatGrdDatasetTest(Dataset):
                 resample=Image.BILINEAR)
 
         # randomly generate roation
-        # theta = np.random.uniform(-1, 1)
-        theta = float(theta)
+        theta = np.random.uniform(-1, 1)
+        # theta = float(theta)
         sat_rand_shift_rand_rot = \
             sat_rand_shift.rotate(theta * self.rotation_range)
+
+        # # debug images
+        # imsave(sat_map, 'sat', 'test_orig')
+        # imsave(sat_rot, 'sat', 'test_rot')
+        # imsave(sat_align_cam, 'sat', 'test_align')
+        # imsave(sat_rand_shift, 'sat', 'test_rshift')
+        # imsave(sat_rand_shift_rand_rot, 'sat', 'test_rshift_rrot')
 
         sat_map = TF.center_crop(sat_rand_shift_rand_rot, utils.SatMap_process_sidelength)
         # sat_map = np.array(sat_map, dtype=np.float32)
