@@ -1,37 +1,28 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 
-import os
-
-import torchvision.utils
-
 # os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
 # os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 
 import torch
-import torch.nn as nn
 import torch.optim as optim
-from torchvision import transforms
 from dataLoader.KITTI_dataset import load_train_data, load_test1_data, load_test2_data
-from torch.utils.tensorboard import SummaryWriter
-import torch.nn.functional as F
 import scipy.io as scio
-
+from wandb_logger import WandbLogger
+from models_kitti import LM_G2SP, LM_S2GP
 import ssl
 
 ssl._create_default_https_context = ssl._create_unverified_context  # for downloading pretrained VGG weights
-
-from models_kitti import LM_G2SP, loss_func, LM_S2GP
 
 import numpy as np
 import os
 import argparse
 
-from utils import gps2distance
 import time
 
+
 ########################### ranking test ############################
-def test1(net_test, args, save_path, best_rank_result, epoch):
+def test1(net_test, args, save_path, best_rank_result, epoch, wandb_logger=None):
     ### net evaluation state
     net_test.eval()
 
@@ -40,6 +31,7 @@ def test1(net_test, args, save_path, best_rank_result, epoch):
     pred_headings = []
     gt_shifts = []
     gt_headings = []
+    wandb_features = dict()
 
     start_time = time.time()
     for i, data in enumerate(dataloader, 0):
@@ -70,6 +62,8 @@ def test1(net_test, args, save_path, best_rank_result, epoch):
 
         if i % 20 == 0:
             print(i)
+        if (i == 5) and (args.debug == True):
+            break
 
     end_time = time.time()
     duration = (end_time - start_time)/len(dataloader)
@@ -105,8 +99,9 @@ def test1(net_test, args, save_path, best_rank_result, epoch):
     print('Init distance average: ', np.mean(init_dis))
     print('Pred distance average: ', np.mean(distance))
     print('Init angle average: ', np.mean(init_angle))
-    print('Pred angle average: ', np.mean(angle_diff))
-
+    print('Pred angle diff average: ', np.mean(angle_diff))
+    wandb_features['test1/fps'] = duration
+    wandb_features['test1/shift_rot_last'] = np.mean(angle_diff)
 
     for idx in range(len(metrics)):
         pred = np.sum(distance < metrics[idx]) / distance.shape[0] * 100
@@ -116,24 +111,34 @@ def test1(net_test, args, save_path, best_rank_result, epoch):
         print(line)
         f.write(line + '\n')
 
+        if idx == 0:
+            wandb_features[f'test1/percent_dis_{metrics[idx]}m'] = pred
+
     print('-------------------------')
     f.write('------------------------\n')
 
     diff_shifts = np.abs(pred_shifts - gt_shifts)
+    wandb_features['test1/shift_lat_last'] = np.mean(diff_shifts[:, 0])
+    wandb_features['test1/shift_lon_last'] = np.mean(diff_shifts[:, 1])
+
     for idx in range(len(metrics)):
-        pred = np.sum(diff_shifts[:, 0] < metrics[idx]) / diff_shifts.shape[0] * 100
+        lat_pred = np.sum(diff_shifts[:, 0] < metrics[idx]) / diff_shifts.shape[0] * 100
         init = np.sum(np.abs(gt_shifts[:, 0]) < metrics[idx]) / init_dis.shape[0] * 100
 
-        line = 'lateral      within ' + str(metrics[idx]) + ' meters (pred, init): ' + str(pred) + ' ' + str(init)
+        line = 'lateral      within ' + str(metrics[idx]) + ' meters (pred, init): ' + str(lat_pred) + ' ' + str(init)
         print(line)
         f.write(line + '\n')
 
-        pred = np.sum(diff_shifts[:, 1] < metrics[idx]) / diff_shifts.shape[0] * 100
+        lon_pred = np.sum(diff_shifts[:, 1] < metrics[idx]) / diff_shifts.shape[0] * 100
         init = np.sum(np.abs(gt_shifts[:, 1]) < metrics[idx]) / diff_shifts.shape[0] * 100
 
-        line = 'longitudinal within ' + str(metrics[idx]) + ' meters (pred, init): ' + str(pred) + ' ' + str(init)
+        line = 'longitudinal within ' + str(metrics[idx]) + ' meters (pred, init): ' + str(lon_pred) + ' ' + str(init)
         print(line)
         f.write(line + '\n')
+
+        if idx == 0:
+            wandb_features[f'test1/percent_lat_{metrics[0]}m'] = lat_pred
+            wandb_features[f'test1/percent_lon_{metrics[0]}m'] = lon_pred
 
     print('-------------------------')
     f.write('------------------------\n')
@@ -144,6 +149,8 @@ def test1(net_test, args, save_path, best_rank_result, epoch):
         line = 'angle within ' + str(angles[idx]) + ' degrees (pred, init): ' + str(pred) + ' ' + str(init)
         print(line)
         f.write(line + '\n')
+        if idx == 0:
+            wandb_features[f'test1/percent_rot_{metrics[0]}m'] = pred
 
     print('-------------------------')
     f.write('------------------------\n')
@@ -155,11 +162,14 @@ def test1(net_test, args, save_path, best_rank_result, epoch):
                ' (pred, init): ' + str(pred) + ' ' + str(init)
         print(line)
         f.write(line + '\n')
+        if idx == 0:
+            wandb_features[f'test1/pred_lat_rot_{metrics[0]}'] = pred
 
     print('====================================')
     f.write('====================================\n')
     f.close()
     result = np.sum((distance < metrics[0]) & (angle_diff < angles[0])) / distance.shape[0] * 100
+    wandb_logger.log_evaluate(wandb_features)
 
     net_test.train()
 
@@ -172,7 +182,7 @@ def test1(net_test, args, save_path, best_rank_result, epoch):
     return result
 
 
-def test2(net_test, args, save_path, best_rank_result, epoch):
+def test2(net_test, args, save_path, best_rank_result, epoch, wandb_logger):
     ### net evaluation state
     net_test.eval()
 
@@ -181,6 +191,7 @@ def test2(net_test, args, save_path, best_rank_result, epoch):
     pred_headings = []
     gt_shifts = []
     gt_headings = []
+    wandb_features = dict()
 
     start_time = time.time()
 
@@ -249,7 +260,8 @@ def test2(net_test, args, save_path, best_rank_result, epoch):
     print('Pred distance average: ', np.mean(distance))
     print('Init angle average: ', np.mean(init_angle))
     print('Pred angle average: ', np.mean(angle_diff))
-
+    wandb_features['test2/fps'] = duration
+    wandb_features['test2/shift_rot_last'] = np.mean(angle_diff)
 
     for idx in range(len(metrics)):
         pred = np.sum(distance < metrics[idx]) / distance.shape[0] * 100
@@ -258,25 +270,34 @@ def test2(net_test, args, save_path, best_rank_result, epoch):
         line = 'distance within ' + str(metrics[idx]) + ' meters (pred, init): ' + str(pred) + ' ' + str(init)
         print(line)
         f.write(line + '\n')
+        if idx == 0:
+            wandb_features[f'test2/percent_dis_{metrics[0]}m'] = pred
 
     print('-------------------------')
     f.write('------------------------\n')
 
     diff_shifts = np.abs(pred_shifts - gt_shifts)
+    wandb_features['test2/shift_lat_last'] = np.mean(diff_shifts[:, 0])
+    wandb_features['test2/shift_lon_last'] = np.mean(diff_shifts[:, 1])
+
     for idx in range(len(metrics)):
-        pred = np.sum(diff_shifts[:, 0] < metrics[idx]) / diff_shifts.shape[0] * 100
+        lat_pred = np.sum(diff_shifts[:, 0] < metrics[idx]) / diff_shifts.shape[0] * 100
         init = np.sum(np.abs(gt_shifts[:, 0]) < metrics[idx]) / init_dis.shape[0] * 100
 
-        line = 'lateral      within ' + str(metrics[idx]) + ' meters (pred, init): ' + str(pred) + ' ' + str(init)
+        line = 'lateral      within ' + str(metrics[idx]) + ' meters (pred, init): ' + str(lat_pred) + ' ' + str(init)
         print(line)
         f.write(line + '\n')
 
-        pred = np.sum(diff_shifts[:, 1] < metrics[idx]) / diff_shifts.shape[0] * 100
+        lon_pred = np.sum(diff_shifts[:, 1] < metrics[idx]) / diff_shifts.shape[0] * 100
         init = np.sum(np.abs(gt_shifts[:, 1]) < metrics[idx]) / diff_shifts.shape[0] * 100
 
-        line = 'longitudinal within ' + str(metrics[idx]) + ' meters (pred, init): ' + str(pred) + ' ' + str(init)
+        line = 'longitudinal within ' + str(metrics[idx]) + ' meters (pred, init): ' + str(lon_pred) + ' ' + str(init)
         print(line)
         f.write(line + '\n')
+
+        if idx == 0:
+            wandb_features[f'test2/percent_lat_{metrics[0]}m'] = lat_pred
+            wandb_features[f'test2/percent_lon_{metrics[0]}m'] = lon_pred
 
     print('-------------------------')
     f.write('------------------------\n')
@@ -287,6 +308,8 @@ def test2(net_test, args, save_path, best_rank_result, epoch):
         line = 'angle within ' + str(angles[idx]) + ' degrees (pred, init): ' + str(pred) + ' ' + str(init)
         print(line)
         f.write(line + '\n')
+        if idx == 0:
+            wandb_features[f'test2/percent_rot_{metrics[0]}m'] = pred
 
     print('-------------------------')
     f.write('------------------------\n')
@@ -298,11 +321,15 @@ def test2(net_test, args, save_path, best_rank_result, epoch):
                ' (pred, init): ' + str(pred) + ' ' + str(init)
         print(line)
         f.write(line + '\n')
+        if idx == 0:
+            wandb_features[f'test2/pred_lat_rot_{metrics[0]}'] = pred
 
     print('====================================')
     f.write('====================================\n')
     f.close()
     # result = np.sum((distance < metrics[0]) & (angle_diff < angles[0])) / distance.shape[0] * 100
+
+    wandb_logger.log_evaluate(wandb_features)
 
     net_test.train()
 
@@ -316,11 +343,13 @@ def test2(net_test, args, save_path, best_rank_result, epoch):
 
 
 ###### learning criterion assignment #######
-def train(net, lr, args, save_path):
+def train(net, lr, args, save_path, wandb_logger):
     bestRankResult = 0.0  # current best, Siam-FCANET18
     # loop over the dataset multiple times
     print(args.resume)
     print(args.epochs)
+    wandb_features = dict()
+
     for epoch in range(args.resume, args.epochs):
         net.train()
 
@@ -340,8 +369,6 @@ def train(net, lr, args, save_path):
         loss_vec = []
 
         print('batch_size:', mini_batch, '\n num of batches:', len(trainloader))
-        if not os.path.exists(save_path):
-            os.makedirs(save_path)
 
         for Loop, Data in enumerate(trainloader, 0):
             # get the inputs
@@ -392,6 +419,11 @@ def train(net, lr, args, save_path):
                           ' L2: ' + str(np.round(torch.sum(L2_loss).item(), decimals=2)) +
                           ' L3: ' + str(np.round(torch.sum(L3_loss).item(), decimals=2)) +
                           ' L4: ' + str(np.round(torch.sum(L4_loss).item(), decimals=2)))
+                    wandb_features['train/L1'] = np.round(torch.sum(L1_loss).item(), decimals=2)
+                    wandb_features['train/L2'] = np.round(torch.sum(L2_loss).item(), decimals=2)
+                    wandb_features['train/L3'] = np.round(torch.sum(L3_loss).item(), decimals=2)
+                    wandb_features['train/L4'] = np.round(torch.sum(L4_loss).item(), decimals=2)
+
                 elif args.loss_method == 1 or args.loss_method == 2:
                     print('Epoch: ' + str(epoch) + ' Loop: ' + str(Loop) + ' Last: Level-' + str(level) +
                           ' loss: ' + str(np.round(loss_last[level].item(), decimals=4)) +
@@ -399,6 +431,9 @@ def train(net, lr, args, save_path):
                           ' lon: ' + str(np.round(shift_lon_last[level].item(), decimals=4)) +
                           ' rot: ' + str(np.round(theta_last[level].item(), decimals=4)) +
                           ' L1: ' + str(np.round(torch.sum(L1_loss).item(), decimals=2)))
+                    wandb_features['train/loss'] = np.round(loss_last[level].item(), decimals=4)
+                    wandb_features['train/L1'] = np.round(torch.sum(L1_loss).item(), decimals=2)
+
                 else:
                     print('Epoch: ' + str(epoch) + ' Loop: ' + str(Loop) + ' Last: Level-' + str(level) +
                           ' loss: ' + str(np.round(loss_last[level].item(), decimals=4)) +
@@ -406,6 +441,20 @@ def train(net, lr, args, save_path):
                           ' lon: ' + str(np.round(shift_lon_last[level].item(), decimals=2)) +
                           ' rot: ' + str(np.round(theta_last[level].item(), decimals=2))
                           )
+
+                # log wandb features
+                wandb_features['train/loss_decrease'] = np.round(loss_decrease[level].item(), decimals=4)
+                wandb_features['train/shift_lat_decrease'] = np.round(shift_lat_decrease[level].item(), decimals=2)
+                wandb_features['train/shift_lon_decrease'] = np.round(shift_lon_decrease[level].item(), decimals=2)
+                wandb_features['train/shift_rot_decrease'] = np.round(thetas_decrease[level].item(), decimals=2)
+
+                wandb_features['train/loss_last'] = np.round(loss_last[level].item(), decimals=4)
+                wandb_features['train/shift_lat_last'] = np.round(shift_lat_last[level].item(), decimals=2)
+                wandb_features['train/shift_lon_last'] = np.round(shift_lon_last[level].item(), decimals=2)
+                wandb_features['train/shift_rot_last'] = np.round(theta_last[level].item(), decimals=2)
+
+                wandb_logger.log_evaluate(wandb_features)
+
 
         ### save modelget_similarity_fn
         compNum = epoch % 100
@@ -416,11 +465,11 @@ def train(net, lr, args, save_path):
         torch.save(net.state_dict(), os.path.join(save_path, 'model_' + str(compNum) + '.pth'))
 
         ### ranking test
-        current = test1(net, args, save_path, bestRankResult, epoch)
+        current = test1(net, args, save_path, bestRankResult, epoch, wandb_logger)
         if (current > bestRankResult):
             bestRankResult = current
 
-        test2(net, args, save_path, bestRankResult, epoch)
+        test2(net, args, save_path, bestRankResult, epoch, wandb_logger)
 
     print('Finished Training')
 
@@ -429,12 +478,17 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--resume', type=int, default=0, help='resume the trained model')
     parser.add_argument('--test', type=int, default=0, help='test with trained model')
-    parser.add_argument('--load-model', type=str, default='best', choices=['0', '1', '2', '3'], help='load model for test')
+    parser.add_argument('--save', '-s', type=str, required=True, default='debug', help='save_path')
+    parser.add_argument('--load-model', type=str, default='best', choices=['0', '1', '2', '3', 'best'], help='load model for test')
     parser.add_argument('--debug', type=int, default=0, help='debug to dump middle processing images')
+    parser.add_argument('--wandb', '-wb', action='store_true', help='Turn on wandb log')
 
     parser.add_argument('--epochs', type=int, default=5, help='number of training epochs')
-
     parser.add_argument('--lr', type=float, default=1e-4, help='learning rate')  # 1e-2
+    parser.add_argument('--batch_size', type=int, default=3, help='batch size')
+    parser.add_argument('--Optimizer', type=str, default='LM', help='LM or SGD or ADAM, NN, NN2')
+    parser.add_argument('--beta1', type=float, default=0.9, help='coefficients for adam optimizer')
+    parser.add_argument('--beta2', type=float, default=0.999, help='coefficients for adam optimizer')
 
     parser.add_argument('--stereo', type=int, default=0, help='use left and right ground image')
     parser.add_argument('--sequence', type=int, default=1, help='use n images merge to 1 ground image')
@@ -453,23 +507,21 @@ def parse_args():
 
     parser.add_argument('--metric_distance', type=float, default=5., help='meters')
 
-    parser.add_argument('--batch_size', type=int, default=3, help='batch size')
     parser.add_argument('--loss_method', type=int, default=0, help='0, 1, 2, 3')
-
     parser.add_argument('--level', type=int, default=3, help='2, 3, 4, -1, -2, -3, -4')
     parser.add_argument('--N_iters', type=int, default=5, help='any integer')
     parser.add_argument('--using_weight', type=int, default=0, help='weighted LM or not')
     parser.add_argument('--damping', type=float, default=0.1, help='coefficient in LM optimization')
     parser.add_argument('--train_damping', type=int, default=0, help='coefficient in LM optimization')
 
-    # parameters below are used for the first-step metric learning traning
+    # parameters below are used for the first-step metric learning training
     parser.add_argument('--negative_samples', type=int, default=32, help='number of negative samples '
                                                                          'for the metric learning training')
     parser.add_argument('--use_conf_metric', type=int, default=0, help='0  or 1 ')
 
     parser.add_argument('--direction', type=str, default='S2GP', help='G2SP' or 'S2GP')
     parser.add_argument('--Load', type=int, default=0, help='0 or 1, load_metric_learning_weight or not')
-    parser.add_argument('--Optimizer', type=str, default='LM', help='LM or SGD or ADAM, NN, NN2')
+    # parser.add_argument('--Optimizer', type=str, default='LM', help='LM or SGD or ADAM, NN, NN2')
 
     parser.add_argument('--level_first', type=int, default=0, help='0 or 1, estimate grd depth or not')
     parser.add_argument('--proj', type=str, default='geo', help='geo, polar, nn')
@@ -479,9 +531,6 @@ def parse_args():
     parser.add_argument('--use_hessian', type=int, default=0, help='0 or 1')
 
     parser.add_argument('--visualize', type=int, default=0, help='0 or 0')
-
-    parser.add_argument('--beta1', type=float, default=0.9, help='coefficients for adam optimizer')
-    parser.add_argument('--beta2', type=float, default=0.999, help='coefficients for adam optimizer')
 
     args = parser.parse_args()
 
@@ -539,7 +588,17 @@ if __name__ == '__main__':
 
     mini_batch = args.batch_size
 
-    save_path = getSavePath(args)
+    if args.wandb:
+        wandb_config = dict(project="vpr", entity='kaist-url-ai28', name=args.save)  # resume=args.resume)
+        wandb_logger = WandbLogger(wandb_config, args)
+    else:
+        wandb_logger = WandbLogger(None)
+    wandb_logger.before_run()
+
+    # save_path = getSavePath(args)
+    save_path = f'/ws/external/Models/ModelsKitti/{args.save}'
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
 
     net = eval('LM_' + args.direction)(args)
 
@@ -552,11 +611,12 @@ if __name__ == '__main__':
             model = 'Model_best.pth'
         else:
             model = f'model_{args.load_model}.pth'
-        net.load_state_dict(torch.load(os.path.join(save_path, model)))
-        # net.load_state_dict(torch.load(os.path.join(save_path, 'Model_best.pth')))
-        # net.load_state_dict(torch.load(os.path.join(args.load_model)))
-        test1(net, args, save_path, 0., epoch=0)
-        test2(net, args, save_path, 0., epoch=0)
+        path = os.path.join(save_path, model)
+        if os.path.exists(path):
+            net.load_state_dict(torch.load(os.path.join(save_path, model)))
+
+        test1(net, args, save_path, 0., epoch=0, wandb_logger=wandb_logger)
+        test2(net, args, save_path, 0., epoch=0, wandb_logger=wandb_logger)
 
     else:
 
@@ -569,5 +629,5 @@ if __name__ == '__main__':
 
         lr = args.lr
 
-        train(net, lr, args, save_path)
+        train(net, lr, args, save_path, wandb_logger)
 
